@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IPFS · Office/PDF Upload & Preview (Local Test)</title>
+    <!-- This test uses iframe to realize preview-->
+    <!-- with native browser,chrome-->
+    <script>
+        tailwind = {
+            config: {
+                safelist: [
+                    'min-h-screen', 'bg-gradient-to-b', 'from-white', 'to-gray-50', 'text-gray-900', 'mx-auto', 'max-w-5xl', 'px-4', 'py-10',
+                    'text-2xl', 'font-semibold', 'tracking-tight', 'text-sm', 'text-gray-600', 'text-xs', 'font-medium', 'text-blue-600', 'hover:underline', 'text-gray-700', 'text-red-700', 'text-gray-500',
+                    'mb-8', 'mt-2', 'mt-3', 'mt-4', 'mt-8', 'mb-3', 'p-3', 'p-4', 'p-6', 'rounded-2xl', 'rounded-3xl', 'shadow-sm', 'border', 'border-red-200', 'bg-white', 'bg-red-50', 'bg-gray-50',
+                    'flex', 'inline-flex', 'items-center', 'items-start', 'justify-between', 'justify-center', 'justify-end', 'gap-2', 'gap-3', 'grid', 'grow', 'shrink-0', 'min-w-0', 'divide-y',
+                    'px-4', 'py-2', 'px-3', 'py-1.5', 'active:scale-[0.99]', 'bg-black', 'text-white', 'hover:bg-black/90', 'disabled:opacity-50', 'disabled:cursor-not-allowed',
+                    'w-full', 'focus:outline-none', 'focus:ring-2', 'focus:ring-black/20',
+                    'truncate', 'rounded-full', 'overflow-hidden'
+                ]
+            }
+        }
+
+
+
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- React 18 UMD -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+    <!-- Babel (compile JSX in-browser for quick local testing) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        html,
+        body {
+            height: 100%;
+        }
+    </style>
+</head>
+
+<body class="min-h-screen bg-gradient-to-b from-white to-gray-50 text-gray-900">
+    <noscript>JavaScript is required to run this page.</noscript>
+    <div id="root"></div>
+
+    <!-- App script: explicitly set presets to avoid blank page / Script error issues -->
+    <script type="text/babel" data-presets="env,react">
+        // =============== Config ===============
+        // ⚠️ Local testing only: your Pinata JWT (never ship secrets to the client in production)
+        const PINATA_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySW5mb3JtYXRpb24iOnsiaWQiOiJiYWRiZTU2ZS00MDk1LTQxNmYtOTI0NS0zNDk1MjJjOGJmNTMiLCJlbWFpbCI6ImpzeGo4MUAxNjMuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsInBpbl9wb2xpY3kiOnsicmVnaW9ucyI6W3siZGVzaXJlZFJlcGxpY2F0aW9uQ291bnQiOjEsImlkIjoiRlJBMSJ9LHsiZGVzaXJlZFJlcGxpY2F0aW9uQ291bnQiOjEsImlkIjoiTllDMSJ9XSwidmVyc2lvbiI6MX0sIm1mYV9lbmFibGVkIjpmYWxzZSwic3RhdHVzIjoiQUNUSVZFIn0sImF1dGhlbnRpY2F0aW9uVHlwZSI6InNjb3BlZEtleSIsInNjb3BlZEtleUtleSI6ImIyMmE3N2U2MmEwY2QzN2EzNTNlIiwic2NvcGVkS2V5U2VjcmV0IjoiOWNkYmJjYzUyMjY3MzYwNmU5MTAwNGY2ZjRlOTJkYWQxYjhmZDhmOTE1MjUzOGZkMjBjMDY0OTBjN2NkNTZkYSIsImV4cCI6MTc5MDI2MTE4Nn0.QAwt-k-NTGwdJHAzxW1sqEpAcg2b6o0UuvLv0ZCGkRw";
+
+        // Use your own backend proxy in production (recommended). If true, POST to /api/pinata/upload
+        const USE_SECURE_SERVER = false;
+
+        // Pinata gateway (default gateway.pinata.cloud)
+        const PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs/";
+
+        // Office Web Viewer (Word/Excel/PowerPoint)
+        const officeViewer = (url) => `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}&wdStartOn=1`;
+
+        // Local storage key
+        const STORE_KEY = "pinata_office_uploads_v1";
+
+        // =============== Helpers: CID normalization & preview selection ===============
+        function extractCid(raw) {
+            if (!raw) return "";
+            let s = String(raw).trim();
+            s = s.replace(/^ipfs:\/\//i, ""); // strip ipfs://
+            try {
+                const u = new URL(s);
+                const parts = u.pathname.split("/").filter(Boolean);
+                const ipfsIdx = parts.findIndex((p) => p.toLowerCase() === "ipfs");
+                if (ipfsIdx !== -1 && parts[ipfsIdx + 1]) return parts[ipfsIdx + 1];
+                if (parts[0]) return parts[0];
+            } catch (_) { /* not a URL */ }
+            const m = s.replace(/^\/+/, "").match(/^[^/?#]+/);
+            return m ? m[0] : s;
+        }
+
+        function getExt(name = "") {
+            const m = /\.([a-zA-Z0-9]+)$/.exec(name.trim());
+            return m ? m[1].toLowerCase() : "";
+        }
+
+        function isOfficeExt(ext) {
+            return ["ppt", "pptx", "doc", "docx", "xls", "xlsx"].includes(ext);
+        }
+
+        function isPdfExt(ext) { return ext === "pdf"; }
+
+        function makeGatewayUrlFromInput(input, fileName) {
+            const cid = extractCid(input);
+            const name = (fileName && fileName.trim()) || "file.bin"; // safe default
+            return `${PINATA_GATEWAY}${cid}?filename=${encodeURIComponent(name)}`;
+        }
+
+        // the start of preview
+        function buildPreviewUrl(gatewayUrl, ext) {
+            if (isOfficeExt(ext)) return officeViewer(gatewayUrl);
+            // For PDF (and unknown), rely on native browser/pdf viewer
+            return gatewayUrl;
+        }
+        // the end of preview
+
+        // =============== Lightweight self-tests (dev-time sanity) ===============
+        (function selfTests() {
+            console.assert(typeof React !== 'undefined', 'React should be loaded');
+            console.assert(typeof ReactDOM !== 'undefined', 'ReactDOM should be loaded');
+            const u = officeViewer('https://example.com/a b.pptx');
+            console.assert(u.includes('view.officeapps.live.com'), 'officeViewer link');
+            console.assert(!u.includes(' '), 'officeViewer url must be encoded');
+            // CID parsing
+            const cases = [
+                { i: 'bafy123', o: 'bafy123' },
+                { i: ' ipfs://bafy456 ', o: 'bafy456' },
+                { i: 'https://gateway.pinata.cloud/ipfs/bafy789', o: 'bafy789' },
+                { i: 'https://ipfs.io/ipfs/bafy999?filename=x.pptx', o: 'bafy999' },
+            ];
+            cases.forEach(({ i, o }) => { const got = extractCid(i); console.assert(got === o, 'extractCid fail', i, '=>', got, 'expect', o); });
+            // Preview routing
+            console.assert(isOfficeExt('pptx') && isOfficeExt('docx') && isOfficeExt('xlsx'), 'office ext routing');
+            console.assert(isPdfExt('pdf') && !isPdfExt('docx'), 'pdf ext routing');
+        })();
+
+        // =============== UI atoms (Tailwind) ===============
+        const Spinner = () => (
+            <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+            </svg>
+        );
+
+        const Tag = ({ children }) => (
+            <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs text-gray-600">{children}</span>
+        );
+
+        const Button = ({ children, className = "", ...props }) => (
+            <button
+                className={
+                    "inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium shadow-sm transition active:scale-[0.99] " +
+                    "bg-black text-white hover:bg-black/90 disabled:opacity-50 disabled:cursor-not-allowed " + className
+                }
+                {...props}
+            >
+                {children}
+            </button>
+        );
+
+        const GhostButton = ({ children, className = "", ...props }) => (
+            <button
+                className={
+                    "inline-flex items-center justify-center gap-2 rounded-2xl px-3 py-1.5 text-sm font-medium transition " +
+                    "bg-white border hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed " + className
+                }
+                {...props}
+            >
+                {children}
+            </button>
+        );
+
+        const Input = React.forwardRef(({ className = "", ...props }, ref) => (
+            <input
+                ref={ref}
+                className={"w-full rounded-2xl border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/20 " + className}
+                {...props}
+            />
+        ));
+        Input.displayName = "Input";
+
+        // =============== App ===============
+        function PinataFileManager() {
+            const [files, setFiles] = React.useState([]);
+            const [items, setItems] = React.useState(() => {
+                try { const raw = localStorage.getItem(STORE_KEY); return raw ? JSON.parse(raw) : []; } catch { return []; }
+            });
+            const [cidToFetch, setCidToFetch] = React.useState("");
+            const [cidFileName, setCidFileName] = React.useState("");
+            const [previewUrl, setPreviewUrl] = React.useState("");
+            const [lastGatewayUrl, setLastGatewayUrl] = React.useState("");
+            const [uploading, setUploading] = React.useState(false);
+            const [error, setError] = React.useState("");
+
+            React.useEffect(() => { localStorage.setItem(STORE_KEY, JSON.stringify(items)); }, [items]);
+
+            // Allowed types
+            const EXT_ALLOW = [".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx", ".pdf"];
+            const MIME_ALLOW = [
+                "application/vnd.ms-powerpoint",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/pdf",
+            ];
+
+            const onPick = (e) => {
+                setError("");
+                const list = Array.from(e.target.files || []);
+                const filtered = list.filter((f) => {
+                    const lower = f.name.toLowerCase();
+                    const extOk = EXT_ALLOW.some((ext) => lower.endsWith(ext));
+                    const mimeOk = MIME_ALLOW.includes(f.type);
+                    return extOk || mimeOk;
+                });
+                if (filtered.length !== list.length) {
+                    setError("Only .ppt/.pptx/.doc/.docx/.xls/.xlsx/.pdf are accepted. Others were ignored.");
+                }
+                setFiles(filtered);
+            };
+
+            const composeGatewayUrl = (cid, name) => `${PINATA_GATEWAY}${cid}${name ? `?filename=${encodeURIComponent(name)}` : ""}`;
+
+            const uploadOne = async (file) => {
+                if (USE_SECURE_SERVER) {
+                    const form = new FormData(); form.append("file", file);
+                    const res = await fetch("/api/pinata/upload", { method: "POST", body: form });
+                    if (!res.ok) throw new Error(`Backend upload failed: ${res.status}`);
+                    return res.json();
+                }
+                if (!PINATA_JWT) throw new Error("PINATA_JWT is missing (local test only). Provide it, or enable USE_SECURE_SERVER.");
+
+                const formData = new FormData();
+                formData.append("file", file);
+                const ext = getExt(file.name);
+                const metadata = { name: file.name, keyvalues: { kind: isOfficeExt(ext) ? "office" : (isPdfExt(ext) ? "pdf" : "other"), ext } };
+                formData.append("pinataMetadata", JSON.stringify(metadata));
+                formData.append("pinataOptions", JSON.stringify({ cidVersion: 1 }));
+
+                const res = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${PINATA_JWT}` },
+                    body: formData,
+                });
+                if (!res.ok) { const txt = await res.text(); throw new Error(`Pinata upload failed: ${res.status} ${txt}`); }
+                const out = await res.json();
+                return { ...out, fileName: file.name };
+            };
+
+            const handleUpload = async () => {
+                if (!files.length) { setError("Please pick files first."); return; }
+                setError(""); setUploading(true);
+                try {
+                    const results = [];
+                    for (const f of files) {
+                        const r = await uploadOne(f);
+                        const cid = r.IpfsHash || r.cid || r.hash;
+                        if (!cid) throw new Error("Upload succeeded but no CID returned.");
+                        results.push({ cid, name: r.fileName || f.name, size: f.size, ts: Date.now() });
+                    }
+                    setItems((prev) => [...results, ...prev]);
+                    setFiles([]);
+                } catch (e) {
+                    console.error(e); setError(e.message || "Upload failed. Try again.");
+                } finally { setUploading(false); }
+            };
+
+            // the start of preview
+            const handlePreview = (cid, name) => {
+                const url = composeGatewayUrl(cid, name || "file.bin");
+                const ext = getExt(name || "");
+                const pv = buildPreviewUrl(url, ext);
+                setLastGatewayUrl(url); setPreviewUrl(pv);
+            };
+            // the end of preview
+
+            const handleDownload = (cid, name) => {
+                const url = composeGatewayUrl(cid, name || "download.bin");
+                const a = document.createElement("a"); a.href = url; a.download = name || "download.bin"; document.body.appendChild(a); a.click(); a.remove();
+            };
+
+            // the start of preview
+            const handleLoadByCid = () => {
+                const raw = cidToFetch.trim(); if (!raw) return;
+                const gUrl = makeGatewayUrlFromInput(raw, cidFileName);
+                const ext = getExt(cidFileName || "");
+                const pv = buildPreviewUrl(gUrl, ext);
+                setLastGatewayUrl(gUrl); setPreviewUrl(pv);
+            };
+            // the end of preview
+
+            const copy = async (text) => { try { await navigator.clipboard.writeText(text); } catch { } };
+
+            return (
+                <div className="mx-auto max-w-5xl px-4 py-10">
+                    {/* Header */}
+                    <div className="mb-8 flex items-start justify-between gap-4">
+                        <div>
+                            <h1 className="text-2xl font-semibold tracking-tight">📦 IPFS · Office/PDF Uploader & Online Preview</h1>
+                            <p className="mt-2 text-sm text-gray-600">Upload .ppt/.pptx/.doc/.docx/.xls/.xlsx/.pdf to IPFS (Pinata), then download or preview in-browser.</p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                <Tag>Direct upload: {PINATA_JWT ? "JWT provided (local only)" : "JWT missing"}</Tag>
+                                <Tag>Backend proxy: {USE_SECURE_SERVER ? "ON" : "OFF"}</Tag>
+                                <Tag>Gateway: {new URL(PINATA_GATEWAY).host}</Tag>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Uploader card */}
+                    <div className="rounded-3xl border bg-white p-6 shadow-sm">
+                        <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+                            <div className="grow">
+                                <label className="text-sm font-medium text-gray-700">Pick files (.ppt/.pptx/.doc/.docx/.xls/.xlsx/.pdf)</label>
+                                <Input type="file" accept={EXT_ALLOW.join(",")} multiple onChange={onPick} className="mt-2" />
+                                {!!files.length && (
+                                    <p className="mt-2 text-xs text-gray-500">{files.length} file(s) selected.</p>
+                                )}
+                            </div>
+                            <div className="shrink-0">
+                                <Button onClick={handleUpload} disabled={uploading}>
+                                    {uploading ? (<><Spinner /> Uploading...</>) : (<>Upload to IPFS</>)}
+                                </Button>
+                            </div>
+                        </div>
+                        {error && (
+                            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+                        )}
+                        <div className="mt-4 rounded-2xl bg-gray-50 p-3 text-xs text-gray-600">
+                            ⚠️ For production, please enable a backend proxy (also, set USE_SECURE_SERVER = true) and remove the my JWT from client code.
+                        </div>
+                    </div>
+
+                    {/* Upload history */}
+                    <div className="mt-8">
+                        <h2 className="mb-3 text-lg font-medium">📜 Uploads (stored locally)</h2>
+                        {items.length === 0 ? (
+                            <div className="rounded-3xl border bg-white p-6 text-sm text-gray-500">No uploads yet. Try uploading a file.</div>
+                        ) : (
+                            <div className="divide-y rounded-3xl border bg-white">
+                                {items.map((it, idx) => (
+                                    <div key={idx} className="grid gap-3 p-4 sm:grid-cols-[1fr_auto] sm:items-center">
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <span className="truncate font-medium">{it.name}</span>
+                                                <span className="text-xs text-gray-500">{(it.size / 1024 / 1024).toFixed(2)} MB</span>
+                                            </div>
+                                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                                                <span className="truncate">CID: {it.cid}</span>
+                                                <GhostButton onClick={() => copy(it.cid)}>Copy CID</GhostButton>
+                                                <a className="truncate text-blue-600 hover:underline" href={composeGatewayUrl(it.cid, it.name)} target="_blank" rel="noreferrer">Gateway link</a>
+                                            </div>
+                                        </div>
+                                        <div className="flex flex-wrap items-center justify-end gap-2">
+                                            <GhostButton onClick={() => handlePreview(it.cid, it.name)}>Preview</GhostButton>
+                                            <Button className="px-3" onClick={() => handleDownload(it.cid, it.name)}>Download</Button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Preview by CID */}
+                    <div className="mt-8 rounded-3xl border bg-white p-6">
+                        <h2 className="mb-3 text-lg font-medium">🔎 Preview by CID</h2>
+                        <p className="mt-2 text-xs text-gray-500">Office files (.doc/.docx/.xls/.xlsx/.ppt/.pptx) open through Office Web Viewer. PDFs use the browser's native viewer. Public access via an IPFS gateway is required.</p>
+
+                        {/* Embedded preview */}
+                        {/* the start of preview */}
+                        {previewUrl && (
+                            <div className="mt-4 overflow-hidden rounded-2xl border">
+                                <div className="w-full" style={{ height: '70vh' }}>
+                                    <iframe title="file-preview" src={previewUrl} className="h-full w-full" allowFullScreen />
+                                </div>
+                                {/* Troubleshooting links */}
+                                <div className="flex flex-wrap items-center gap-3 p-3 text-xs text-gray-600">
+                                    <a className="text-blue-600 hover:underline" href={previewUrl} target="_blank" rel="noreferrer">Open preview in new tab</a>
+                                    {lastGatewayUrl && (
+                                        <a className="text-blue-600 hover:underline" href={lastGatewayUrl} target="_blank" rel="noreferrer">Open raw gateway file</a>
+                                    )}
+                                    {/* the end of preview */}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+        /* ok */
+
+        // Mount (use ReactDOM.render for UMD compatibility)
+        (function mount() {
+            try {
+                const el = document.getElementById('root'); if (!el) throw new Error('#root not found');
+                ReactDOM.render(<PinataFileManager />, el);
+                console.log('[OK] App mounted');
+            } catch (e) {
+                console.error(e);
+                const fallback = document.createElement('pre');
+                fallback.style.color = 'red'; fallback.style.whiteSpace = 'pre-wrap';
+                fallback.textContent = 'Init failed: ' + (e && e.message ? e.message : e);
+                document.body.appendChild(fallback);
+            }
+        })();
+    </script>
+</body>
+
+
+</html>

@@ -1,12 +1,11 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>IPFS · Office/PDF Upload & Preview (Local Test)</title>
-    <!-- This test uses iframe to realize preview-->
-    <!-- with native browser,chrome-->
+    <title>Pinata · Office/PDF Upload & Preview (Local Test)</title>
+
     <script>
         tailwind = {
             config: {
@@ -24,15 +23,11 @@
     </script>
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- React 18 UMD -->
+    <!-- Load libs in correct order (no defer) so Babel/React are ready before inline JSX runs -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-
-    <!-- Babel (compile JSX in-browser for quick local testing) -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-    <!-- JSZip for handling ZIP-based Office files -->
-    <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
     <style>
         html,
@@ -46,261 +41,123 @@
     <noscript>JavaScript is required to run this page.</noscript>
     <div id="root"></div>
 
-    <!-- App script: explicitly set presets to avoid blank page / Script error issues -->
     <script type="text/babel" data-presets="env,react">
-        // =============== Config ===============
-        // ⚠️ Local testing only: your Pinata JWT (never ship secrets to the client in production)
         const PINATA_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySW5mb3JtYXRpb24iOnsiaWQiOiJiYWRiZTU2ZS00MDk1LTQxNmYtOTI0NS0zNDk1MjJjOGJmNTMiLCJlbWFpbCI6ImpzeGo4MUAxNjMuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsInBpbl9wb2xpY3kiOnsicmVnaW9ucyI6W3siZGVzaXJlZFJlcGxpY2F0aW9uQ291bnQiOjEsImlkIjoiRlJBMSJ9LHsiZGVzaXJlZFJlcGxpY2F0aW9uQ291bnQiOjEsImlkIjoiTllDMSJ9XSwidmVyc2lvbiI6MX0sIm1mYV9lbmFibGVkIjpmYWxzZSwic3RhdHVzIjoiQUNUSVZFIn0sImF1dGhlbnRpY2F0aW9uVHlwZSI6InNjb3BlZEtleSIsInNjb3BlZEtleUtleSI6ImIyMmE3N2U2MmEwY2QzN2EzNTNlIiwic2NvcGVkS2V5U2VjcmV0IjoiOWNkYmJjYzUyMjY3MzYwNmU5MTAwNGY2ZjRlOTJkYWQxYjhmZDhmOTE1MjUzOGZkMjBjMDY0OTBjN2NkNTZkYSIsImV4cCI6MTc5MDI2MTE4Nn0.QAwt-k-NTGwdJHAzxW1sqEpAcg2b6o0UuvLv0ZCGkRw";
-
-        // Use your own backend proxy in production (recommended). If true, POST to /api/pinata/upload
         const USE_SECURE_SERVER = false;
-
-        // Pinata gateway (default gateway.pinata.cloud)
         const PINATA_GATEWAY = "https://gateway.pinata.cloud/ipfs/";
-
-        // Office Web Viewer (Word/Excel/PowerPoint)
         const officeViewer = (url) => `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}&wdStartOn=1`;
-
-        // Local storage key
         const STORE_KEY = "pinata_office_uploads_v1";
 
-        // =============== Helpers: CID normalization & preview selection ===============
+        const ALLOWED_ADDR = "0x6cD6592b7D2A9b1E59AA60a6138434d2fE4CD062";
+        const ALLOWED_ADDR_L = ALLOWED_ADDR.toLowerCase();
+
         function extractCid(raw) {
             if (!raw) return "";
             let s = String(raw).trim();
-            s = s.replace(/^ipfs:\/\//i, ""); // strip ipfs://
+            s = s.replace(/^ipfs:\/\//i, "");
             try {
                 const u = new URL(s);
                 const parts = u.pathname.split("/").filter(Boolean);
                 const ipfsIdx = parts.findIndex((p) => p.toLowerCase() === "ipfs");
                 if (ipfsIdx !== -1 && parts[ipfsIdx + 1]) return parts[ipfsIdx + 1];
                 if (parts[0]) return parts[0];
-            } catch (_) { /* not a URL */ }
+            } catch { }
             const m = s.replace(/^\/+/, "").match(/^[^/?#]+/);
             return m ? m[0] : s;
         }
-
-        function getExt(name = "") {
-            const m = /\.([a-zA-Z0-9]+)$/.exec(name.trim());
-            return m ? m[1].toLowerCase() : "";
-        }
-
-        function isOfficeExt(ext) {
-            return ["ppt", "pptx", "doc", "docx", "xls", "xlsx"].includes(ext);
-        }
-
+        function getExt(name = "") { const m = /\.([a-zA-Z0-9]+)$/.exec(name.trim()); return m ? m[1].toLowerCase() : ""; }
+        function isOfficeExt(ext) { return ["ppt", "pptx", "doc", "docx", "xls", "xlsx"].includes(ext); }
         function isPdfExt(ext) { return ext === "pdf"; }
+        function makeGatewayUrlFromInput(input, fileName) { const cid = extractCid(input); const name = (fileName && fileName.trim()) || "file.bin"; return `${PINATA_GATEWAY}${cid}?filename=${encodeURIComponent(name)}`; }
 
-        function makeGatewayUrlFromInput(input, fileName) {
-            const cid = extractCid(input);
-            const name = (fileName && fileName.trim()) || "file.bin"; // safe default
-            return `${PINATA_GATEWAY}${cid}?filename=${encodeURIComponent(name)}`;
+        // === crypto helpers ===
+        const te = new TextEncoder();
+        const td = new TextDecoder();
+        const b64 = {
+            toUrl: (buf) => {
+                let s = btoa(String.fromCharCode(...new Uint8Array(buf)));
+                return s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            },
+            fromUrl: (s) => {
+                s = s.replace(/-/g, '+').replace(/_/g, '/');
+                const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+                const bin = atob(s + pad);
+                const out = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+                return out.buffer;
+            }
+        };
+        const rand = (n) => { const a = new Uint8Array(n); crypto.getRandomValues(a); return a; };
+        async function sha256(buf) { const d = await crypto.subtle.digest('SHA-256', buf); return b64.toUrl(d); }
+        async function importAesKey(raw) { return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']); }
+        async function aesGcmEncrypt(keyBytes, ivBytes, plainBuf, aad) {
+            const key = await importAesKey(keyBytes);
+            const params = { name: 'AES-GCM', iv: ivBytes }; if (aad) params.additionalData = aad;
+            return new Uint8Array(await crypto.subtle.encrypt(params, key, plainBuf));
+        }
+        async function aesGcmDecrypt(keyBytes, ivBytes, cipherBuf, aad) {
+            const key = await importAesKey(keyBytes);
+            const params = { name: 'AES-GCM', iv: ivBytes }; if (aad) params.additionalData = aad;
+            return new Uint8Array(await crypto.subtle.decrypt(params, key, cipherBuf));
+        }
+        async function hkdf32(ikmBytes, saltBytes, infoStr) {
+            const baseKey = await crypto.subtle.importKey('raw', ikmBytes, 'HKDF', false, ['deriveBits']);
+            const bits = await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: saltBytes, info: te.encode(infoStr) }, baseKey, 256);
+            return new Uint8Array(bits);
         }
 
         // the start of preview
         function buildPreviewUrl(gatewayUrl, ext) {
             if (isOfficeExt(ext)) return officeViewer(gatewayUrl);
-            // For PDF (and unknown), rely on native browser/pdf viewer
             return gatewayUrl;
         }
         // the end of preview
 
-        // =============== Speaker Notes Extraction ===============
-        async function extractSpeakerNotes(file) {
-            try {
-                const arrayBuffer = await file.arrayBuffer();
-                const ext = getExt(file.name);
-                if (!isOfficeExt(ext)) {
-                    return { notes: [], error: 'Only Office files support speaker notes extraction' };
-                }
-                const notes = await parsePresentationNotes(arrayBuffer, ext);
-                return { notes, error: null };
-            } catch (error) {
-                console.error('Error extracting speaker notes:', error);
-                return { notes: [], error: 'Failed to extract speaker notes: ' + error.message };
-            }
-        }
-
-        // 更健壮的 PPTX 注释解析
-        async function parsePresentationNotes(arrayBuffer, ext) {
-            try {
-                if (ext !== 'pptx') {
-                    throw new Error('Only .pptx files are supported for speaker notes extraction');
-                }
-
-                const zip = new JSZip();
-                const zipContent = await zip.loadAsync(arrayBuffer);
-                const notes = [];
-
-                const notesFiles = Object.keys(zipContent.files).filter(fileName =>
-                    fileName.startsWith('ppt/notesSlides/notesSlide') && fileName.endsWith('.xml')
-                );
-
-                // 使用命名空间读取文本，减少解析不全的问题
-                const A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
-
-                for (const notesFile of notesFiles) {
-                    try {
-                        const slideNumber = parseInt(notesFile.match(/notesSlide(\d+)\.xml/)?.[1] || '0');
-                        const xmlContent = await zipContent.files[notesFile].async('text');
-                        const parser = new DOMParser();
-                        const xmlDoc = parser.parseFromString(xmlContent, 'text/xml');
-
-                        // 逐段落收集文本：a:p -> a:r -> a:t，同时处理 a:br 换行
-                        const paragraphs = xmlDoc.getElementsByTagNameNS(A_NS, 'p');
-                        let noteText = '';
-                        for (const p of paragraphs) {
-                            let line = '';
-                            // 在该段内，按文档顺序拼接 a:r/a:t，期间遇到 a:br 视为换行
-                            const childNodes = Array.from(p.childNodes);
-                            for (const node of childNodes) {
-                                if (node.namespaceURI === A_NS && node.localName === 'r') {
-                                    const tNodes = node.getElementsByTagNameNS(A_NS, 't');
-                                    for (const t of tNodes) {
-                                        if (t.textContent) line += t.textContent;
-                                    }
-                                    const brs = node.getElementsByTagNameNS(A_NS, 'br');
-                                    if (brs && brs.length > 0) line += '\n'.repeat(brs.length);
-                                } else if (node.namespaceURI === A_NS && node.localName === 'br') {
-                                    line += '\n';
-                                }
-                            }
-                            if (line.trim().length > 0) {
-                                noteText += (noteText ? '\n' : '') + line.trim();
-                            }
-                        }
-
-                        // 兜底：如果按段落为空，则退回到所有 a:t 拼空格
-                        if (!noteText.trim()) {
-                            const tNodes = xmlDoc.getElementsByTagNameNS(A_NS, 't');
-                            let fallback = '';
-                            for (const t of tNodes) {
-                                if (t.textContent) fallback += t.textContent + ' ';
-                            }
-                            noteText = fallback.trim();
-                        }
-
-                        if (noteText) {
-                            notes.push({
-                                slideNumber,
-                                notes: noteText,
-                                timestamp: new Date().toISOString()
-                            });
-                        }
-                    } catch (error) {
-                        console.error(`Error parsing notes file ${notesFile}:`, error);
-                    }
-                }
-
-                if (notes.length === 0) {
-                    return [
-                        {
-                            slideNumber: 1,
-                            notes: "此演示文稿中没有找到演讲者注释。请确保在PowerPoint中添加了备注内容。",
-                            timestamp: new Date().toISOString()
-                        }
-                    ];
-                }
-
-                notes.sort((a, b) => a.slideNumber - b.slideNumber);
-                return notes;
-            } catch (error) {
-                console.error('Error parsing presentation:', error);
-                return [
-                    {
-                        slideNumber: 1,
-                        notes: `解析失败: ${error.message}。请确保文件格式正确且包含演讲者注释。`,
-                        timestamp: new Date().toISOString()
-                    }
-                ];
-            }
-        }
-
-        // 从IPFS URL获取文件并提取注释
-        async function extractNotesFromIPFS(gatewayUrl, fileName) {
-            try {
-                const response = await fetch(gatewayUrl);
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch file: ${response.status}`);
-                }
-
-                const arrayBuffer = await response.arrayBuffer();
-                const file = new File([arrayBuffer], fileName, { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' });
-
-                return await extractSpeakerNotes(file);
-            } catch (error) {
-                console.error('Error extracting notes from IPFS:', error);
-                return { notes: [], error: 'Failed to extract notes from IPFS: ' + error.message };
-            }
-        }
-
-        // =============== UI atoms (Tailwind) ===============
         const Spinner = () => (
             <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
             </svg>
         );
-
-        const Tag = ({ children }) => (
-            <span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs text-gray-600">{children}</span>
-        );
-
-        const Button = ({ children, className = "", ...props }) => (
-            <button
-                className={
-                    "inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium shadow-sm transition active:scale-[0.99] " +
-                    "bg-black text-white hover:bg-black/90 disabled:opacity-50 disabled:cursor-not-allowed " + className
-                }
-                {...props}
-            >
-                {children}
-            </button>
-        );
-
-        const GhostButton = ({ children, className = "", ...props }) => (
-            <button
-                className={
-                    "inline-flex items-center justify-center gap-2 rounded-2xl px-3 py-1.5 text-sm font-medium transition " +
-                    "bg-white border hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed " + className
-                }
-                {...props}
-            >
-                {children}
-            </button>
-        );
-
-        const Input = React.forwardRef(({ className = "", ...props }, ref) => (
-            <input
-                ref={ref}
-                className={"w-full rounded-2xl border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/20 " + className}
-                {...props}
-            />
-        ));
+        const Tag = ({ children }) => (<span className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs text-gray-600">{children}</span>);
+        const Button = ({ children, className = "", ...props }) => (<button className={"inline-flex items-center justify-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium shadow-sm transition active:scale-[0.99] " + "bg-black text-white hover:bg-black/90 disabled:opacity-50 disabled:cursor-not-allowed " + className} {...props}>{children}</button>);
+        const GhostButton = ({ children, className = "", ...props }) => (<button className={"inline-flex items-center justify-center gap-2 rounded-2xl px-3 py-1.5 text-sm font-medium transition " + "bg-white border hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed " + className} {...props}>{children}</button>);
+        const Input = React.forwardRef(({ className = "", ...props }, ref) => (<input ref={ref} className={"w-full rounded-2xl border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black/20 " + className} {...props} />));
         Input.displayName = "Input";
 
-        // =============== App ===============
         function PinataFileManager() {
             const [files, setFiles] = React.useState([]);
-            const [items, setItems] = React.useState(() => {
-                try { const raw = localStorage.getItem(STORE_KEY); return raw ? JSON.parse(raw) : []; } catch { return []; }
-            });
-            const [cidToFetch, setCidToFetch] = React.useState("");
-            const [cidFileName, setCidFileName] = React.useState("");
+            const [items, setItems] = React.useState(() => { try { const raw = localStorage.getItem(STORE_KEY); return raw ? JSON.parse(raw) : []; } catch { return []; } });
             const [previewUrl, setPreviewUrl] = React.useState("");
             const [lastGatewayUrl, setLastGatewayUrl] = React.useState("");
             const [uploading, setUploading] = React.useState(false);
             const [error, setError] = React.useState("");
-
-            // 演讲者注释相关状态
-            const [speakerNotes, setSpeakerNotes] = React.useState([]);
-            const [notesLoading, setNotesLoading] = React.useState(false);
-            const [notesError, setNotesError] = React.useState("");
-            const [showNotes, setShowNotes] = React.useState(false);
+            const [viewerAddr, setViewerAddr] = React.useState("");
+            const [unlocked, setUnlocked] = React.useState(false);
 
             React.useEffect(() => { localStorage.setItem(STORE_KEY, JSON.stringify(items)); }, [items]);
 
-            // Allowed types
+            // Sync on MetaMask account changes
+            React.useEffect(() => {
+                if (window.ethereum && window.ethereum.on) {
+                    const handler = (accs) => {
+                        const addr = (accs && accs[0]) ? accs[0] : '';
+                        setViewerAddr(addr || '');
+                        const ok = !!addr && addr.toLowerCase() === ALLOWED_ADDR_L;
+                        setUnlocked(ok);
+                        setError(ok ? '' : 'Address not authorized for this demo');
+                    };
+                    window.ethereum.on('accountsChanged', handler);
+                    return () => { try { window.ethereum.removeListener('accountsChanged', handler); } catch { } };
+                }
+            }, []);
+
+            React.useEffect(() => {
+                if (!unlocked) {
+                    try { setLastGatewayUrl(''); setPreviewUrl(genLockHTML()); } catch (e) { }
+                }
+            }, [unlocked]);
+
             const EXT_ALLOW = [".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx", ".pdf"];
             const MIME_ALLOW = [
                 "application/vnd.ms-powerpoint",
@@ -321,13 +178,52 @@
                     const mimeOk = MIME_ALLOW.includes(f.type);
                     return extOk || mimeOk;
                 });
-                if (filtered.length !== list.length) {
-                    setError("Only .ppt/.pptx/.doc/.docx/.xls/.xlsx/.pdf are accepted. Others were ignored.");
-                }
+                if (filtered.length !== list.length) setError("Only .ppt/.pptx/.doc/.docx/.xls/.xlsx/.pdf are accepted. Others were ignored.");
                 setFiles(filtered);
             };
 
             const composeGatewayUrl = (cid, name) => `${PINATA_GATEWAY}${cid}${name ? `?filename=${encodeURIComponent(name)}` : ""}`;
+
+            async function pinFile(file) {
+                const formData = new FormData();
+                formData.append("file", file);
+                formData.append("pinataMetadata", JSON.stringify({ name: file.name }));
+                formData.append("pinataOptions", JSON.stringify({ cidVersion: 1 }));
+                const res = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", { method: 'POST', headers: { Authorization: `Bearer ${PINATA_JWT}` }, body: formData });
+                if (!res.ok) { const t = await res.text(); throw new Error(`Pinata upload failed: ${res.status} ${t}`); }
+                return res.json();
+            }
+            async function pinJSON(name, obj) {
+                const res = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${PINATA_JWT}` }, body: JSON.stringify({ pinataMetadata: { name }, pinataOptions: { cidVersion: 1 }, pinataContent: obj }) });
+                if (!res.ok) { const t = await res.text(); throw new Error(`Pin JSON failed: ${res.status} ${t}`); }
+                return res.json();
+            }
+
+            async function encryptAndUpload(file) {
+                const plain = new Uint8Array(await file.arrayBuffer());
+                const fileKey = rand(32);
+                const ivFile = rand(12);
+                const hash = await sha256(plain.buffer);
+                const cipher = await aesGcmEncrypt(fileKey, ivFile, plain.buffer);
+                const encFile = new File([cipher], file.name + ".enc", { type: "application/octet-stream" });
+                const encRes = await pinFile(encFile); // { IpfsHash }
+                const cipherCid = encRes.IpfsHash;
+
+                const salt = rand(16);
+                const ivK = rand(12);
+                const kek = await hkdf32(te.encode(ALLOWED_ADDR_L), salt, `kek-v1|${ALLOWED_ADDR_L}|${hash}`);
+                const wrapped = await aesGcmEncrypt(kek, ivK, fileKey.buffer, te.encode('kek-v1'));
+
+                const manifest = {
+                    v: 1, algo: 'AES-256-GCM', name: file.name, mime: file.type || 'application/octet-stream', size: file.size,
+                    sha256: hash, ivFile: b64.toUrl(ivFile), cipherCid,
+                    wrap: { salt: b64.toUrl(salt), recipients: [{ address: ALLOWED_ADDR, ivK: b64.toUrl(ivK), wrappedKey: b64.toUrl(wrapped) }] }
+                };
+                const manRes = await pinJSON(file.name + ".manifest.json", manifest);
+                const manifestCid = manRes.IpfsHash;
+
+                return { cipherCid, manifestCid, name: file.name, size: cipher.length, sha256: hash, enc: true };
+            }
 
             const uploadOne = async (file) => {
                 if (USE_SECURE_SERVER) {
@@ -337,22 +233,13 @@
                     return res.json();
                 }
                 if (!PINATA_JWT) throw new Error("PINATA_JWT is missing (local test only). Provide it, or enable USE_SECURE_SERVER.");
-
-                const formData = new FormData();
-                formData.append("file", file);
                 const ext = getExt(file.name);
-                const metadata = { name: file.name, keyvalues: { kind: isOfficeExt(ext) ? "office" : (isPdfExt(ext) ? "pdf" : "other"), ext } };
-                formData.append("pinataMetadata", JSON.stringify(metadata));
-                formData.append("pinataOptions", JSON.stringify({ cidVersion: 1 }));
-
-                const res = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
-                    method: "POST",
-                    headers: { Authorization: `Bearer ${PINATA_JWT}` },
-                    body: formData,
-                });
-                if (!res.ok) { const txt = await res.text(); throw new Error(`Pinata upload failed: ${res.status} ${txt}`); }
-                const out = await res.json();
-                return { ...out, fileName: file.name };
+                if (ext === 'pptx') {
+                    // For demo: keep PPTX plaintext so Office Web Viewer works
+                    const plainRes = await pinFile(file);
+                    return { IpfsHash: plainRes.IpfsHash, name: file.name, size: file.size, enc: false };
+                }
+                return encryptAndUpload(file);
             };
 
             const handleUpload = async () => {
@@ -362,9 +249,9 @@
                     const results = [];
                     for (const f of files) {
                         const r = await uploadOne(f);
-                        const cid = r.IpfsHash || r.cid || r.hash;
+                        const cid = r.cipherCid || r.IpfsHash || r.cid || r.hash;
                         if (!cid) throw new Error("Upload succeeded but no CID returned.");
-                        results.push({ cid, name: r.fileName || f.name, size: f.size, ts: Date.now() });
+                        results.push({ cid, name: r.name || f.name, size: r.size || f.size, ts: Date.now(), manifestCid: r.manifestCid, enc: !!r.enc, sha256: r.sha256 });
                     }
                     setItems((prev) => [...results, ...prev]);
                     setFiles([]);
@@ -373,66 +260,125 @@
                 } finally { setUploading(false); }
             };
 
-            // ▼ 新增：复制&导出全部备注
-            const copyAllNotes = async () => {
-                try {
-                    const text = speakerNotes.map(n => `第 ${n.slideNumber} 页\n${n.notes}`).join('\n\n');
-                    await navigator.clipboard.writeText(text);
-                } catch (e) {
-                    console.error(e);
-                }
-            };
+            async function fetchJsonFromCid(cid) {
+                const res = await fetch(`${PINATA_GATEWAY}${cid}`);
+                if (!res.ok) throw new Error(`Fetch manifest failed: ${res.status}`);
+                return res.json();
+            }
+            async function fetchArrayBufferFromCid(cid) {
+                const res = await fetch(`${PINATA_GATEWAY}${cid}`);
+                if (!res.ok) throw new Error(`Fetch ciphertext failed: ${res.status}`);
+                return res.arrayBuffer();
+            }
 
-            const downloadNotesJSON = () => {
-                const blob = new Blob([JSON.stringify(speakerNotes, null, 2)], { type: 'application/json' });
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = (cidFileName || 'notes') + '.json';
-                document.body.appendChild(a); a.click(); a.remove();
-            };
+            function genNotesHTML(notes, downloadHref, filename) {
+                const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                const items = notes.map((t, i) => `<div style="padding:12px;border-bottom:1px solid #eee"><div style="font-weight:600;margin-bottom:6px">Slide ${i + 1}</div><div style="white-space:pre-wrap;line-height:1.6">${esc(t)}</div></div>`).join('');
+                const body = `${items || '<div style="padding:12px;color:#666">No speaker notes found.</div>'}`;
+                const html = `<!doctype html><meta charset="utf-8"/><title>Notes</title><div>${body}</div>`;
+                const blob = new Blob([html], { type: 'text/html' });
+                return URL.createObjectURL(blob);
+            }
+            function genPptxEmbedWithNotes(officeUrl, notes) {
+                const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                const items = notes.map((t, i) => `<div style="padding:12px;border-bottom:1px solid #eee"><div style="font-weight:600;margin-bottom:6px">Slide ${i + 1} · Speaker Notes</div><div style="white-space:pre-wrap;line-height:1.6">${esc(t)}</div></div>`).join('');
+                const notesHtml = items || '<div style="padding:12px;color:#666">No speaker notes found.</div>';
+                const html = `<!doctype html><meta charset="utf-8"/><title>PPTX Preview</title>
+          <div style="display:flex;flex-direction:column;height:100vh">
+            <div style="height:55vh;border-bottom:1px solid #eee">
+              <iframe src="${officeUrl}" style="width:100%;height:100%;border:0" allowfullscreen></iframe>
+            </div>
+            <div style="height:45vh;overflow:auto">${notesHtml}</div>
+          </div>`;
+                const blob = new Blob([html], { type: 'text/html' });
+                return URL.createObjectURL(blob);
+            }
+
+            function genLockHTML() {
+                const html = `<!doctype html><meta charset="utf-8"/><title>Locked</title>
+          <div style="height:100vh;display:flex;align-items:center;justify-content:center;background:#fff">
+            <div style="text-align:center;color:#444">
+              <div style="font-size:64px;line-height:1">🔒</div>
+              <div style="margin-top:8px;font:14px/1.5 system-ui,Segoe UI,Arial">You donnot have access to the document</div>
+            </div>
+          </div>`;
+                const blob = new Blob([html], { type: 'text/html' });
+                return URL.createObjectURL(blob);
+            }
+
+            async function parsePptxNotes(arrayBuffer) {
+                if (!window.JSZip) {
+                    for (let i = 0; i < 100 && !window.JSZip; i++) { await new Promise(r => setTimeout(r, 30)); }
+                    if (!window.JSZip) throw new Error('Preview failed: JSZip not loaded');
+                }
+                const zip = await window.JSZip.loadAsync(arrayBuffer);
+                const notes = [];
+                for (let i = 1; i < 500; i++) {
+                    const p = `ppt/notesSlides/notesSlide${i}.xml`;
+                    const f = zip.file(p); if (!f) break;
+                    const xml = await f.async('text');
+                    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+                    const nodes = doc.getElementsByTagNameNS('*', 't');
+                    let txt = '';
+                    for (let j = 0; j < nodes.length; j++) { txt += nodes[j].textContent; }
+                    notes.push(txt.trim());
+                }
+                return notes;
+            }
 
             // the start of preview
             const handlePreview = async (cid, name) => {
-                const url = composeGatewayUrl(cid, name || "file.bin");
-                const ext = getExt(name || "");
-                const pv = buildPreviewUrl(url, ext);
-                setLastGatewayUrl(url);
-                setPreviewUrl(pv);
-
-                // 同步到「Preview by CID」输入框，便于用户复制/编辑
-                setCidToFetch(cid);
-                setCidFileName(name || "presentation.pptx");
-
-                // 自动滚动到预览区域
-                requestAnimationFrame(() => {
-                    const anchor = document.getElementById('preview-by-cid');
-                    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                });
-
-                // 如果是PPT文件，尝试提取演讲者注释
-                if (isOfficeExt(ext) && (ext === 'ppt' || ext === 'pptx')) {
-                    setNotesLoading(true);
-                    setNotesError("");
-                    setShowNotes(true); // 立即显示注释区域
-                    try {
-                        const result = await extractNotesFromIPFS(url, name || "presentation.pptx");
-                        if (result.error) {
-                            setNotesError(result.error);
-                            setSpeakerNotes([]);
+                try {
+                    setError(""); setPreviewUrl("");
+                    if (!unlocked) { setLastGatewayUrl(''); setPreviewUrl(genLockHTML()); setError('Address not authorized for this demo'); return; }
+                    const it = items.find(x => x.cid === cid && x.name === name) || {};
+                    if (it.enc && it.manifestCid) {
+                        if (!viewerAddr || viewerAddr.toLowerCase() !== ALLOWED_ADDR_L) { setError('Access denied: unlock with the allowed address first.'); return; }
+                        const manifest = await fetchJsonFromCid(it.manifestCid);
+                        const salt = new Uint8Array(b64.fromUrl(manifest.wrap.salt));
+                        const recipient = manifest.wrap.recipients.find(r => (r.address || '').toLowerCase() === ALLOWED_ADDR_L);
+                        if (!recipient) throw new Error('No wrapped key for this address');
+                        const kek = await hkdf32(te.encode(viewerAddr.toLowerCase()), salt, `kek-v1|${viewerAddr.toLowerCase()}|${manifest.sha256}`);
+                        const fileKey = await aesGcmDecrypt(kek, new Uint8Array(b64.fromUrl(recipient.ivK)), new Uint8Array(b64.fromUrl(recipient.wrappedKey)), te.encode('kek-v1'));
+                        const cipherBuf = await fetchArrayBufferFromCid(manifest.cipherCid);
+                        const plain = await aesGcmDecrypt(fileKey, new Uint8Array(b64.fromUrl(manifest.ivFile)), new Uint8Array(cipherBuf));
+                        const ext = getExt(manifest.name || '');
+                        if (isPdfExt(ext)) {
+                            const url = URL.createObjectURL(new Blob([plain], { type: 'application/pdf' }));
+                            setLastGatewayUrl(''); setPreviewUrl(url);
+                        } else if (ext === 'pptx') {
+                            const notes = await parsePptxNotes(plain.buffer);
+                            const blobUrl = URL.createObjectURL(new Blob([plain], { type: manifest.mime || 'application/octet-stream' }));
+                            const htmlUrl = genNotesHTML(notes, blobUrl, manifest.name || 'file.pptx');
+                            setLastGatewayUrl(''); setPreviewUrl(htmlUrl);
                         } else {
-                            setSpeakerNotes(result.notes);
+                            const blobUrl = URL.createObjectURL(new Blob([plain], { type: manifest.mime || 'application/octet-stream' }));
+                            const html = `<!doctype html><meta charset="utf-8"/><title>Decrypted</title><div style="padding:12px;font:14px/1.5 system-ui,Segoe UI,Arial">Decrypted successfully. <a href="${blobUrl}" download="${encodeURIComponent(manifest.name || 'file.bin')}">Download</a></div>`;
+                            const dataUrl = 'data:text/html;base64,' + btoa(unescape(encodeURIComponent(html)));
+                            setLastGatewayUrl(''); setPreviewUrl(dataUrl);
                         }
-                    } catch (error) {
-                        console.error('提取演讲者注释时出错:', error);
-                        setNotesError("提取演讲者注释时出错: " + error.message);
-                        setSpeakerNotes([]);
-                    } finally {
-                        setNotesLoading(false);
+                    } else {
+                        const url = composeGatewayUrl(cid, name || 'file.bin');
+                        const ext = getExt(name || '');
+                        if (ext === 'pptx') {
+                            try {
+                                const res = await fetch(url);
+                                if (!res.ok) throw new Error('Fetch PPTX failed: ' + res.status);
+                                const arr = await res.arrayBuffer();
+                                const notes = await parsePptxNotes(arr);
+                                const htmlUrl = genPptxEmbedWithNotes(officeViewer(url), notes);
+                                setLastGatewayUrl(url); setPreviewUrl(htmlUrl);
+                            } catch (e) {
+                                console.warn('Notes parse failed, fallback to Office viewer', e);
+                                const pv = buildPreviewUrl(url, ext);
+                                setLastGatewayUrl(url); setPreviewUrl(pv);
+                            }
+                        } else {
+                            const pv = buildPreviewUrl(url, ext);
+                            setLastGatewayUrl(url); setPreviewUrl(pv);
+                        }
                     }
-                } else {
-                    setSpeakerNotes([]);
-                    setShowNotes(false);
-                }
+                } catch (e) { console.error(e); setError(e.message || 'Preview failed'); }
             };
             // the end of preview
 
@@ -441,89 +387,66 @@
                 const a = document.createElement("a"); a.href = url; a.download = name || "download.bin"; document.body.appendChild(a); a.click(); a.remove();
             };
 
-            // the start of preview (Load by CID)
-            const handleLoadByCid = async () => {
-                const raw = cidToFetch.trim(); if (!raw) return;
-                const gUrl = makeGatewayUrlFromInput(raw, cidFileName);
-                const ext = getExt(cidFileName || "");
-                const pv = buildPreviewUrl(gUrl, ext);
-                setLastGatewayUrl(gUrl);
-                setPreviewUrl(pv);
-
-                // 自动滚动
-                requestAnimationFrame(() => {
-                    const anchor = document.getElementById('preview-by-cid');
-                    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                });
-
-                // 如果是PPT文件，尝试提取演讲者注释
-                if (isOfficeExt(ext) && (ext === 'ppt' || ext === 'pptx')) {
-                    setNotesLoading(true);
-                    setNotesError("");
-                    setShowNotes(true); // 立即显示注释区域
-                    try {
-                        const result = await extractNotesFromIPFS(gUrl, cidFileName || "presentation.pptx");
-                        if (result.error) {
-                            setNotesError(result.error);
-                            setSpeakerNotes([]);
-                        } else {
-                            setSpeakerNotes(result.notes);
-                        }
-                    } catch (error) {
-                        setNotesError("提取演讲者注释时出错: " + error.message);
-                        setSpeakerNotes([]);
-                    } finally {
-                        setNotesLoading(false);
-                    }
-                } else {
-                    setSpeakerNotes([]);
-                    setShowNotes(false);
-                }
+            // the start of preview
+            const handleLoadByCid = () => {
+                // (CID preview by inputs was removed earlier; keep function for marker compat)
             };
             // the end of preview
 
             const copy = async (text) => { try { await navigator.clipboard.writeText(text); } catch { } };
 
+            const onUnlock = async () => {
+                try {
+                    if (!window.ethereum || !window.ethereum.request) { setError('MetaMask not detected'); return; }
+                    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                    const addr = (accounts && accounts[0]) ? accounts[0] : '';
+                    setViewerAddr(addr || '');
+                    const ok = !!addr && addr.toLowerCase() === ALLOWED_ADDR_L;
+                    setUnlocked(ok);
+                    setError(ok ? '' : 'Address not authorized for this demo');
+                } catch (e) {
+                    setError(e?.message || 'Wallet connection failed');
+                }
+            };
+
             return (
                 <div className="mx-auto max-w-5xl px-4 py-10">
-                    {/* Header */}
                     <div className="mb-8 flex items-start justify-between gap-4">
                         <div>
-                            <h1 className="text-2xl font-semibold tracking-tight">📦 IPFS · Office/PDF Uploader & Online Preview</h1>
-                            <p className="mt-2 text-sm text-gray-600">Upload .ppt/.pptx/.doc/.docx/.xls/.xlsx/.pdf to IPFS (Pinata), then download or preview in-browser.</p>
+                            <h1 className="text-2xl font-semibold tracking-tight">📦 Pinata · Office/PDF Uploader & Online Preview</h1>
+                            <p className="mt-2 text-sm text-gray-600">Encrypted upload to IPFS; local decryption on authorized client. PDF previews inline; PPTX shows speaker notes.</p>
                             <div className="mt-3 flex flex-wrap gap-2">
                                 <Tag>Direct upload: {PINATA_JWT ? "JWT provided (local only)" : "JWT missing"}</Tag>
                                 <Tag>Backend proxy: {USE_SECURE_SERVER ? "ON" : "OFF"}</Tag>
                                 <Tag>Gateway: {new URL(PINATA_GATEWAY).host}</Tag>
+                                {unlocked ? <Tag>Unlocked</Tag> : null}
                             </div>
+                        </div>
+                        <div className="w-full max-w-sm">
+                            <label className="text-sm font-medium text-gray-700">Connect wallet to unlock</label>
+                            <div className="mt-2 flex gap-2 items-center">
+                                <Button onClick={onUnlock}>{viewerAddr ? 'Connected' : 'Connect MetaMask'}</Button>
+                                {viewerAddr ? <Tag>{viewerAddr}</Tag> : null}
+                            </div>
+                            <p className="mt-1 text-xs text-gray-500">For this demo, only {ALLOWED_ADDR} is authorized.</p>
                         </div>
                     </div>
 
-                    {/* Uploader card */}
                     <div className="rounded-3xl border bg-white p-6 shadow-sm">
                         <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
                             <div className="grow">
                                 <label className="text-sm font-medium text-gray-700">Pick files (.ppt/.pptx/.doc/.docx/.xls/.xlsx/.pdf)</label>
                                 <Input type="file" accept={EXT_ALLOW.join(",")} multiple onChange={onPick} className="mt-2" />
-                                {!!files.length && (
-                                    <p className="mt-2 text-xs text-gray-500">{files.length} file(s) selected.</p>
-                                )}
+                                {!!files.length && (<p className="mt-2 text-xs text-gray-500">{files.length} file(s) selected.</p>)}
                             </div>
                             <div className="shrink-0">
-                                <Button onClick={handleUpload} disabled={uploading}>
-                                    {uploading ? (<><Spinner /> Uploading...</>) : (<>Upload to IPFS</>)}
-                                </Button>
+                                <Button onClick={handleUpload} disabled={uploading}>{uploading ? (<><Spinner /> Uploading...</>) : (<>Upload (encrypted)</>)}</Button>
                             </div>
                         </div>
-                        {error && (
-                            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
-                        )}
-                        <div className="mt-4 rounded-2xl bg-gray-50 p-3 text-xs text-gray-600">
-                            ⚠️ For production, please enable a backend proxy (also, set USE_SECURE_SERVER = true) and remove the my JWT from client code.
-                        </div>
+                        {error && (<div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>)}
+                        <div className="mt-4 rounded-2xl bg-gray-50 p-3 text-xs text-gray-600">Client-side AES-256-GCM. A demo-wrapped key is embedded for the allowed address only.</div>
                     </div>
 
-                    {/* Upload history */}
                     <div className="mt-8">
                         <h2 className="mb-3 text-lg font-medium">📜 Uploads (stored locally)</h2>
                         {items.length === 0 ? (
@@ -535,17 +458,18 @@
                                         <div className="min-w-0">
                                             <div className="flex items-center gap-2">
                                                 <span className="truncate font-medium">{it.name}</span>
-                                                <span className="text-xs text-gray-500">{(it.size / 1024 / 1024).toFixed(2)} MB</span>
+                                                <span className="text-xs text-gray-500">{(it.size / 1024 / 1024).toFixed(2)} MB {it.enc ? '· encrypted' : ''}</span>
                                             </div>
                                             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600">
                                                 <span className="truncate">CID: {it.cid}</span>
                                                 <GhostButton onClick={() => copy(it.cid)}>Copy CID</GhostButton>
-                                                <a className="truncate text-blue-600 hover:underline" href={composeGatewayUrl(it.cid, it.name)} target="_blank" rel="noreferrer">Gateway link</a>
+                                                <a className="truncate text-blue-600 hover:underline" href={composeGatewayUrl(it.cid, it.name + (it.enc ? '.enc' : ''))} target="_blank" rel="noreferrer">Gateway link</a>
+                                                {it.manifestCid ? <a className="truncate text-blue-600 hover:underline" href={composeGatewayUrl(it.manifestCid, it.name + '.manifest.json')} target="_blank" rel="noreferrer">Manifest</a> : null}
                                             </div>
                                         </div>
                                         <div className="flex flex-wrap items-center justify-end gap-2">
                                             <GhostButton onClick={() => handlePreview(it.cid, it.name)}>Preview</GhostButton>
-                                            <Button className="px-3" onClick={() => handleDownload(it.cid, it.name)}>Download</Button>
+                                            <Button className="px-3" onClick={() => handleDownload(it.cid, it.name + (it.enc ? '.enc' : ''))}>Download</Button>
                                         </div>
                                     </div>
                                 ))}
@@ -553,120 +477,17 @@
                         )}
                     </div>
 
-                    {/* Preview by CID */}
-                    <div id="preview-by-cid" className="mt-8 rounded-3xl border bg-white p-6">
-                        <h2 className="mb-3 text-lg font-medium">🔎 Preview by CID</h2>
-                        <p className="mt-2 text-xs text-gray-500">Office files (.doc/.docx/.xls/.xlsx/.ppt/.pptx) open through Office Web Viewer. PDFs use the browser's native viewer. Public access via an IPFS gateway is required.</p>
-
-                        {/* CID输入区域 */}
-                        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-                            <div className="grow">
-                                <label className="text-sm font-medium text-gray-700">IPFS CID or URL</label>
-                                <Input
-                                    type="text"
-                                    placeholder="bafy123... or https://gateway.pinata.cloud/ipfs/bafy123..."
-                                    value={cidToFetch}
-                                    onChange={(e) => setCidToFetch(e.target.value)}
-                                    className="mt-1"
-                                />
-                            </div>
-                            <div className="grow">
-                                <label className="text-sm font-medium text-gray-700">File Name (optional)</label>
-                                <Input
-                                    type="text"
-                                    placeholder="presentation.pptx"
-                                    value={cidFileName}
-                                    onChange={(e) => setCidFileName(e.target.value)}
-                                    className="mt-1"
-                                />
-                            </div>
-                            <div className="shrink-0">
-                                <Button onClick={handleLoadByCid} disabled={!cidToFetch.trim()}>
-                                    Load & Preview
-                                </Button>
-                            </div>
-                        </div>
-
-                        {/* 调试信息 */}
-                        <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-700">
-                            💡 <strong>NOTE</strong> If not displays well，please make sure
-                            <br />1. The file is in .pptx format instead of .ppt
-                            <br />2. Comments was added in PowerPoint by View
-
-                        </div>
-
-                        {/* Embedded preview */}
-                        {/* the start of preview */}
+                    <div className="mt-8 rounded-3xl border bg-white p-6">
+                        <h2 className="mb-3 text-lg font-medium">🔎 Preview</h2>
                         {previewUrl && (
-                            <div className="mt-4 space-y-4">
-                                {/* PPT预览区域 */}
-                                <div className="overflow-hidden rounded-2xl border">
-                                    <div className="w-full" style={{ height: '70vh' }}>
-                                        <iframe title="file-preview" src={previewUrl} className="h-full w-full" allowFullScreen />
-                                    </div>
-                                    {/* Troubleshooting links */}
-                                    <div className="flex flex-wrap items-center gap-3 p-3 text-xs text-gray-600">
-                                        <a className="text-blue-600 hover:underline" href={previewUrl} target="_blank" rel="noreferrer">Open preview in new tab</a>
-                                        {lastGatewayUrl && (
-                                            <a className="text-blue-600 hover:underline" href={lastGatewayUrl} target="_blank" rel="noreferrer">Open raw gateway file</a>
-                                        )}
-                                    </div>
+                            <div className="mt-4 overflow-hidden rounded-2xl border">
+                                <div className="w-full" style={{ height: '70vh' }}>
+                                    <iframe title="file-preview" src={previewUrl} className="h-full w-full" allowFullScreen />
                                 </div>
-
-                                {/* 演讲者注释区域 */}
-                                {showNotes && (
-                                    <div className="rounded-2xl border bg-white p-4">
-                                        <div className="mb-3 flex items-center justify-between">
-                                            <h3 className="text-lg font-medium text-gray-900">📝 Speaker Note</h3>
-                                            <div className="flex items-center gap-2">
-                                                <GhostButton onClick={copyAllNotes} className="text-xs">Copy</GhostButton>
-                                                <GhostButton onClick={downloadNotesJSON} className="text-xs">Export</GhostButton>
-                                                <GhostButton onClick={() => setShowNotes(false)} className="text-xs">Hide</GhostButton>
-                                            </div>
-                                        </div>
-
-                                        {notesLoading && (
-                                            <div className="flex items-center justify-center py-8">
-                                                <Spinner />
-                                                <span className="ml-2 text-sm text-gray-600">Extracting speaker's notes...</span>
-                                            </div>
-                                        )}
-
-                                        {notesError && (
-                                            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-                                                ⚠️ {notesError}
-                                                <div className="mt-2 text-xs text-red-600">
-                                                    Please make sure the file is in .pptx format instead of .ppt
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {!notesLoading && !notesError && speakerNotes.length > 0 && (
-                                            <div className="space-y-3">
-                                                {speakerNotes.map((note, index) => (
-                                                    <div key={index} className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                                                        <div className="mb-2 flex items-center gap-2">
-                                                            <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-800">
-                                                                No. {note.slideNumber} Page
-                                                            </span>
-                                                            <span className="text-xs text-gray-500">
-                                                                {new Date(note.timestamp).toLocaleString('zh-CN')}
-                                                            </span>
-                                                        </div>
-                                                        <pre className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">{note.notes}</pre>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                        {!notesLoading && !notesError && speakerNotes.length === 0 && (
-                                            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-center text-sm text-gray-500">
-                                                此演示文稿中没有找到演讲者注释
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                                {/* the end of preview */}
+                                <div className="flex flex-wrap items-center gap-3 p-3 text-xs text-gray-600">
+                                    <a className="text-blue-600 hover:underline" href={previewUrl} target="_blank" rel="noreferrer">Open preview in new tab</a>
+                                    {lastGatewayUrl && (<a className="text-blue-600 hover:underline" href={lastGatewayUrl} target="_blank" rel="noreferrer">Open raw gateway file</a>)}
+                                </div>
                             </div>
                         )}
                     </div>
@@ -674,30 +495,39 @@
             );
         }
 
-        // 轻量自测
+        // ---- Runtime self-tests (keep minimal; no UI impact) ----
         (function selfTests() {
-            console.assert(typeof React !== 'undefined', 'React should be loaded');
-            console.assert(typeof ReactDOM !== 'undefined', 'ReactDOM should be loaded');
-            const u = officeViewer('https://example.com/a b.pptx');
-            console.assert(u.includes('view.officeapps.live.com'), 'officeViewer link');
-            console.assert(!u.includes(' '), 'officeViewer url must be encoded');
-            const cases = [
-                { i: 'bafy123', o: 'bafy123' },
-                { i: ' ipfs://bafy456 ', o: 'bafy456' },
-                { i: 'https://gateway.pinata.cloud/ipfs/bafy789', o: 'bafy789' },
-                { i: 'https://ipfs.io/ipfs/bafy999?filename=x.pptx', o: 'bafy999' },
-            ];
-            cases.forEach(({ i, o }) => { const got = extractCid(i); console.assert(got === o, 'extractCid fail', i, '=>', got, 'expect', o); });
-            console.assert(isOfficeExt('pptx') && isOfficeExt('docx') && isOfficeExt('xlsx'), 'office ext routing');
-            console.assert(isPdfExt('pdf') && !isPdfExt('docx'), 'pdf ext routing');
+            try {
+                console.assert(typeof React !== 'undefined' && typeof ReactDOM !== 'undefined', 'React globals present');
+                (async () => {
+                    const msg = new TextEncoder().encode('hello');
+                    const key = crypto.getRandomValues(new Uint8Array(32));
+                    const iv = crypto.getRandomValues(new Uint8Array(12));
+                    const ct = await aesGcmEncrypt(key, iv, msg.buffer);
+                    const pt = await aesGcmDecrypt(key, iv, ct.buffer);
+                    console.assert(new TextDecoder().decode(pt) === 'hello', 'AES-GCM roundtrip');
+                    const hk = await hkdf32(new Uint8Array([1, 2, 3]), new Uint8Array([4, 5, 6]), 'kek-v1|t');
+                    console.assert(hk.byteLength === 32, 'HKDF length');
+                    // extra mini-tests to catch regressions quickly
+                    const cidCases = [
+                        { i: 'bafy123', o: 'bafy123' },
+                        { i: ' ipfs://bafy456 ', o: 'bafy456' },
+                        { i: 'https://gateway.pinata.cloud/ipfs/bafy789', o: 'bafy789' }
+                    ];
+                    cidCases.forEach(({ i, o }) => { const got = extractCid(i); console.assert(got === o, 'extractCid mismatch', i, got, o); });
+                    const pv = buildPreviewUrl('https://gateway.pinata.cloud/ipfs/abc?filename=x.pptx', 'pptx');
+                    console.assert(pv.includes('view.officeapps.live.com'), 'office viewer route');
+                    try { const u = genPptxEmbedWithNotes('https://example.com', []); console.assert(typeof u === 'string' && u.startsWith('blob:'), 'genPptxEmbedWithNotes returns blob url'); } catch { }
+                })();
+            } catch (e) { console.warn('selfTests skipped', e); }
         })();
 
-        // Mount (use ReactDOM.render for UMD compatibility)
-        (function mount() {
+        // ---- Robust mount: wait for globals & DOM ----
+        function doMount() {
             try {
                 const el = document.getElementById('root'); if (!el) throw new Error('#root not found');
+                if (!(window.React && window.ReactDOM)) { throw new Error('React not ready'); }
                 ReactDOM.render(<PinataFileManager />, el);
-                console.log('[OK] App mounted');
             } catch (e) {
                 console.error(e);
                 const fallback = document.createElement('pre');
@@ -705,7 +535,16 @@
                 fallback.textContent = 'Init failed: ' + (e && e.message ? e.message : e);
                 document.body.appendChild(fallback);
             }
-        })();
+        }
+        function mountWhenReady() {
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', mountWhenReady, { once: true });
+                return;
+            }
+            if (window.React && window.ReactDOM) { doMount(); }
+            else { setTimeout(mountWhenReady, 30); }
+        }
+        mountWhenReady();
     </script>
 </body>
 

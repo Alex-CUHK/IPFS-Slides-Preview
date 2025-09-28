@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
     <meta charset="UTF-8" />
@@ -21,9 +21,6 @@
                 ]
             }
         }
-
-
-
     </script>
     <script src="https://cdn.tailwindcss.com"></script>
 
@@ -33,6 +30,9 @@
 
     <!-- Babel (compile JSX in-browser for quick local testing) -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- JSZip for handling ZIP-based Office files -->
+    <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
 
     <style>
         html,
@@ -105,25 +105,134 @@
         }
         // the end of preview
 
-        // =============== Lightweight self-tests (dev-time sanity) ===============
-        (function selfTests() {
-            console.assert(typeof React !== 'undefined', 'React should be loaded');
-            console.assert(typeof ReactDOM !== 'undefined', 'ReactDOM should be loaded');
-            const u = officeViewer('https://example.com/a b.pptx');
-            console.assert(u.includes('view.officeapps.live.com'), 'officeViewer link');
-            console.assert(!u.includes(' '), 'officeViewer url must be encoded');
-            // CID parsing
-            const cases = [
-                { i: 'bafy123', o: 'bafy123' },
-                { i: ' ipfs://bafy456 ', o: 'bafy456' },
-                { i: 'https://gateway.pinata.cloud/ipfs/bafy789', o: 'bafy789' },
-                { i: 'https://ipfs.io/ipfs/bafy999?filename=x.pptx', o: 'bafy999' },
-            ];
-            cases.forEach(({ i, o }) => { const got = extractCid(i); console.assert(got === o, 'extractCid fail', i, '=>', got, 'expect', o); });
-            // Preview routing
-            console.assert(isOfficeExt('pptx') && isOfficeExt('docx') && isOfficeExt('xlsx'), 'office ext routing');
-            console.assert(isPdfExt('pdf') && !isPdfExt('docx'), 'pdf ext routing');
-        })();
+        // =============== Speaker Notes Extraction ===============
+        async function extractSpeakerNotes(file) {
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                const ext = getExt(file.name);
+                if (!isOfficeExt(ext)) {
+                    return { notes: [], error: 'Only Office files support speaker notes extraction' };
+                }
+                const notes = await parsePresentationNotes(arrayBuffer, ext);
+                return { notes, error: null };
+            } catch (error) {
+                console.error('Error extracting speaker notes:', error);
+                return { notes: [], error: 'Failed to extract speaker notes: ' + error.message };
+            }
+        }
+
+        // 更健壮的 PPTX 注释解析
+        async function parsePresentationNotes(arrayBuffer, ext) {
+            try {
+                if (ext !== 'pptx') {
+                    throw new Error('Only .pptx files are supported for speaker notes extraction');
+                }
+
+                const zip = new JSZip();
+                const zipContent = await zip.loadAsync(arrayBuffer);
+                const notes = [];
+
+                const notesFiles = Object.keys(zipContent.files).filter(fileName =>
+                    fileName.startsWith('ppt/notesSlides/notesSlide') && fileName.endsWith('.xml')
+                );
+
+                // 使用命名空间读取文本，减少解析不全的问题
+                const A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+
+                for (const notesFile of notesFiles) {
+                    try {
+                        const slideNumber = parseInt(notesFile.match(/notesSlide(\d+)\.xml/)?.[1] || '0');
+                        const xmlContent = await zipContent.files[notesFile].async('text');
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(xmlContent, 'text/xml');
+
+                        // 逐段落收集文本：a:p -> a:r -> a:t，同时处理 a:br 换行
+                        const paragraphs = xmlDoc.getElementsByTagNameNS(A_NS, 'p');
+                        let noteText = '';
+                        for (const p of paragraphs) {
+                            let line = '';
+                            // 在该段内，按文档顺序拼接 a:r/a:t，期间遇到 a:br 视为换行
+                            const childNodes = Array.from(p.childNodes);
+                            for (const node of childNodes) {
+                                if (node.namespaceURI === A_NS && node.localName === 'r') {
+                                    const tNodes = node.getElementsByTagNameNS(A_NS, 't');
+                                    for (const t of tNodes) {
+                                        if (t.textContent) line += t.textContent;
+                                    }
+                                    const brs = node.getElementsByTagNameNS(A_NS, 'br');
+                                    if (brs && brs.length > 0) line += '\n'.repeat(brs.length);
+                                } else if (node.namespaceURI === A_NS && node.localName === 'br') {
+                                    line += '\n';
+                                }
+                            }
+                            if (line.trim().length > 0) {
+                                noteText += (noteText ? '\n' : '') + line.trim();
+                            }
+                        }
+
+                        // 兜底：如果按段落为空，则退回到所有 a:t 拼空格
+                        if (!noteText.trim()) {
+                            const tNodes = xmlDoc.getElementsByTagNameNS(A_NS, 't');
+                            let fallback = '';
+                            for (const t of tNodes) {
+                                if (t.textContent) fallback += t.textContent + ' ';
+                            }
+                            noteText = fallback.trim();
+                        }
+
+                        if (noteText) {
+                            notes.push({
+                                slideNumber,
+                                notes: noteText,
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                    } catch (error) {
+                        console.error(`Error parsing notes file ${notesFile}:`, error);
+                    }
+                }
+
+                if (notes.length === 0) {
+                    return [
+                        {
+                            slideNumber: 1,
+                            notes: "此演示文稿中没有找到演讲者注释。请确保在PowerPoint中添加了备注内容。",
+                            timestamp: new Date().toISOString()
+                        }
+                    ];
+                }
+
+                notes.sort((a, b) => a.slideNumber - b.slideNumber);
+                return notes;
+            } catch (error) {
+                console.error('Error parsing presentation:', error);
+                return [
+                    {
+                        slideNumber: 1,
+                        notes: `解析失败: ${error.message}。请确保文件格式正确且包含演讲者注释。`,
+                        timestamp: new Date().toISOString()
+                    }
+                ];
+            }
+        }
+
+        // 从IPFS URL获取文件并提取注释
+        async function extractNotesFromIPFS(gatewayUrl, fileName) {
+            try {
+                const response = await fetch(gatewayUrl);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch file: ${response.status}`);
+                }
+
+                const arrayBuffer = await response.arrayBuffer();
+                const file = new File([arrayBuffer], fileName, { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' });
+
+                return await extractSpeakerNotes(file);
+            } catch (error) {
+                console.error('Error extracting notes from IPFS:', error);
+                return { notes: [], error: 'Failed to extract notes from IPFS: ' + error.message };
+            }
+        }
 
         // =============== UI atoms (Tailwind) ===============
         const Spinner = () => (
@@ -182,6 +291,12 @@
             const [lastGatewayUrl, setLastGatewayUrl] = React.useState("");
             const [uploading, setUploading] = React.useState(false);
             const [error, setError] = React.useState("");
+
+            // 演讲者注释相关状态
+            const [speakerNotes, setSpeakerNotes] = React.useState([]);
+            const [notesLoading, setNotesLoading] = React.useState(false);
+            const [notesError, setNotesError] = React.useState("");
+            const [showNotes, setShowNotes] = React.useState(false);
 
             React.useEffect(() => { localStorage.setItem(STORE_KEY, JSON.stringify(items)); }, [items]);
 
@@ -258,12 +373,66 @@
                 } finally { setUploading(false); }
             };
 
+            // ▼ 新增：复制&导出全部备注
+            const copyAllNotes = async () => {
+                try {
+                    const text = speakerNotes.map(n => `第 ${n.slideNumber} 页\n${n.notes}`).join('\n\n');
+                    await navigator.clipboard.writeText(text);
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            const downloadNotesJSON = () => {
+                const blob = new Blob([JSON.stringify(speakerNotes, null, 2)], { type: 'application/json' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = (cidFileName || 'notes') + '.json';
+                document.body.appendChild(a); a.click(); a.remove();
+            };
+
             // the start of preview
-            const handlePreview = (cid, name) => {
+            const handlePreview = async (cid, name) => {
                 const url = composeGatewayUrl(cid, name || "file.bin");
                 const ext = getExt(name || "");
                 const pv = buildPreviewUrl(url, ext);
-                setLastGatewayUrl(url); setPreviewUrl(pv);
+                setLastGatewayUrl(url);
+                setPreviewUrl(pv);
+
+                // 同步到「Preview by CID」输入框，便于用户复制/编辑
+                setCidToFetch(cid);
+                setCidFileName(name || "presentation.pptx");
+
+                // 自动滚动到预览区域
+                requestAnimationFrame(() => {
+                    const anchor = document.getElementById('preview-by-cid');
+                    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+
+                // 如果是PPT文件，尝试提取演讲者注释
+                if (isOfficeExt(ext) && (ext === 'ppt' || ext === 'pptx')) {
+                    setNotesLoading(true);
+                    setNotesError("");
+                    setShowNotes(true); // 立即显示注释区域
+                    try {
+                        const result = await extractNotesFromIPFS(url, name || "presentation.pptx");
+                        if (result.error) {
+                            setNotesError(result.error);
+                            setSpeakerNotes([]);
+                        } else {
+                            setSpeakerNotes(result.notes);
+                        }
+                    } catch (error) {
+                        console.error('提取演讲者注释时出错:', error);
+                        setNotesError("提取演讲者注释时出错: " + error.message);
+                        setSpeakerNotes([]);
+                    } finally {
+                        setNotesLoading(false);
+                    }
+                } else {
+                    setSpeakerNotes([]);
+                    setShowNotes(false);
+                }
             };
             // the end of preview
 
@@ -272,13 +441,44 @@
                 const a = document.createElement("a"); a.href = url; a.download = name || "download.bin"; document.body.appendChild(a); a.click(); a.remove();
             };
 
-            // the start of preview
-            const handleLoadByCid = () => {
+            // the start of preview (Load by CID)
+            const handleLoadByCid = async () => {
                 const raw = cidToFetch.trim(); if (!raw) return;
                 const gUrl = makeGatewayUrlFromInput(raw, cidFileName);
                 const ext = getExt(cidFileName || "");
                 const pv = buildPreviewUrl(gUrl, ext);
-                setLastGatewayUrl(gUrl); setPreviewUrl(pv);
+                setLastGatewayUrl(gUrl);
+                setPreviewUrl(pv);
+
+                // 自动滚动
+                requestAnimationFrame(() => {
+                    const anchor = document.getElementById('preview-by-cid');
+                    if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+
+                // 如果是PPT文件，尝试提取演讲者注释
+                if (isOfficeExt(ext) && (ext === 'ppt' || ext === 'pptx')) {
+                    setNotesLoading(true);
+                    setNotesError("");
+                    setShowNotes(true); // 立即显示注释区域
+                    try {
+                        const result = await extractNotesFromIPFS(gUrl, cidFileName || "presentation.pptx");
+                        if (result.error) {
+                            setNotesError(result.error);
+                            setSpeakerNotes([]);
+                        } else {
+                            setSpeakerNotes(result.notes);
+                        }
+                    } catch (error) {
+                        setNotesError("提取演讲者注释时出错: " + error.message);
+                        setSpeakerNotes([]);
+                    } finally {
+                        setNotesLoading(false);
+                    }
+                } else {
+                    setSpeakerNotes([]);
+                    setShowNotes(false);
+                }
             };
             // the end of preview
 
@@ -354,32 +554,143 @@
                     </div>
 
                     {/* Preview by CID */}
-                    <div className="mt-8 rounded-3xl border bg-white p-6">
+                    <div id="preview-by-cid" className="mt-8 rounded-3xl border bg-white p-6">
                         <h2 className="mb-3 text-lg font-medium">🔎 Preview by CID</h2>
                         <p className="mt-2 text-xs text-gray-500">Office files (.doc/.docx/.xls/.xlsx/.ppt/.pptx) open through Office Web Viewer. PDFs use the browser's native viewer. Public access via an IPFS gateway is required.</p>
+
+                        {/* CID输入区域 */}
+                        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+                            <div className="grow">
+                                <label className="text-sm font-medium text-gray-700">IPFS CID or URL</label>
+                                <Input
+                                    type="text"
+                                    placeholder="bafy123... or https://gateway.pinata.cloud/ipfs/bafy123..."
+                                    value={cidToFetch}
+                                    onChange={(e) => setCidToFetch(e.target.value)}
+                                    className="mt-1"
+                                />
+                            </div>
+                            <div className="grow">
+                                <label className="text-sm font-medium text-gray-700">File Name (optional)</label>
+                                <Input
+                                    type="text"
+                                    placeholder="presentation.pptx"
+                                    value={cidFileName}
+                                    onChange={(e) => setCidFileName(e.target.value)}
+                                    className="mt-1"
+                                />
+                            </div>
+                            <div className="shrink-0">
+                                <Button onClick={handleLoadByCid} disabled={!cidToFetch.trim()}>
+                                    Load & Preview
+                                </Button>
+                            </div>
+                        </div>
+
+                        {/* 调试信息 */}
+                        <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-700">
+                            💡 <strong>NOTE</strong> If not displays well，please make sure
+                            <br />1. The file is in .pptx format instead of .ppt
+                            <br />2. Comments was added in PowerPoint by View
+
+                        </div>
 
                         {/* Embedded preview */}
                         {/* the start of preview */}
                         {previewUrl && (
-                            <div className="mt-4 overflow-hidden rounded-2xl border">
-                                <div className="w-full" style={{ height: '70vh' }}>
-                                    <iframe title="file-preview" src={previewUrl} className="h-full w-full" allowFullScreen />
+                            <div className="mt-4 space-y-4">
+                                {/* PPT预览区域 */}
+                                <div className="overflow-hidden rounded-2xl border">
+                                    <div className="w-full" style={{ height: '70vh' }}>
+                                        <iframe title="file-preview" src={previewUrl} className="h-full w-full" allowFullScreen />
+                                    </div>
+                                    {/* Troubleshooting links */}
+                                    <div className="flex flex-wrap items-center gap-3 p-3 text-xs text-gray-600">
+                                        <a className="text-blue-600 hover:underline" href={previewUrl} target="_blank" rel="noreferrer">Open preview in new tab</a>
+                                        {lastGatewayUrl && (
+                                            <a className="text-blue-600 hover:underline" href={lastGatewayUrl} target="_blank" rel="noreferrer">Open raw gateway file</a>
+                                        )}
+                                    </div>
                                 </div>
-                                {/* Troubleshooting links */}
-                                <div className="flex flex-wrap items-center gap-3 p-3 text-xs text-gray-600">
-                                    <a className="text-blue-600 hover:underline" href={previewUrl} target="_blank" rel="noreferrer">Open preview in new tab</a>
-                                    {lastGatewayUrl && (
-                                        <a className="text-blue-600 hover:underline" href={lastGatewayUrl} target="_blank" rel="noreferrer">Open raw gateway file</a>
-                                    )}
-                                    {/* the end of preview */}
-                                </div>
+
+                                {/* 演讲者注释区域 */}
+                                {showNotes && (
+                                    <div className="rounded-2xl border bg-white p-4">
+                                        <div className="mb-3 flex items-center justify-between">
+                                            <h3 className="text-lg font-medium text-gray-900">📝 Speaker Note</h3>
+                                            <div className="flex items-center gap-2">
+                                                <GhostButton onClick={copyAllNotes} className="text-xs">Copy</GhostButton>
+                                                <GhostButton onClick={downloadNotesJSON} className="text-xs">Export</GhostButton>
+                                                <GhostButton onClick={() => setShowNotes(false)} className="text-xs">Hide</GhostButton>
+                                            </div>
+                                        </div>
+
+                                        {notesLoading && (
+                                            <div className="flex items-center justify-center py-8">
+                                                <Spinner />
+                                                <span className="ml-2 text-sm text-gray-600">Extracting speaker's notes...</span>
+                                            </div>
+                                        )}
+
+                                        {notesError && (
+                                            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                                                ⚠️ {notesError}
+                                                <div className="mt-2 text-xs text-red-600">
+                                                    Please make sure the file is in .pptx format instead of .ppt
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {!notesLoading && !notesError && speakerNotes.length > 0 && (
+                                            <div className="space-y-3">
+                                                {speakerNotes.map((note, index) => (
+                                                    <div key={index} className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                                                        <div className="mb-2 flex items-center gap-2">
+                                                            <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-800">
+                                                                No. {note.slideNumber} Page
+                                                            </span>
+                                                            <span className="text-xs text-gray-500">
+                                                                {new Date(note.timestamp).toLocaleString('zh-CN')}
+                                                            </span>
+                                                        </div>
+                                                        <pre className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">{note.notes}</pre>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        {!notesLoading && !notesError && speakerNotes.length === 0 && (
+                                            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-center text-sm text-gray-500">
+                                                此演示文稿中没有找到演讲者注释
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                {/* the end of preview */}
                             </div>
                         )}
                     </div>
                 </div>
             );
         }
-        /* ok */
+
+        // 轻量自测
+        (function selfTests() {
+            console.assert(typeof React !== 'undefined', 'React should be loaded');
+            console.assert(typeof ReactDOM !== 'undefined', 'ReactDOM should be loaded');
+            const u = officeViewer('https://example.com/a b.pptx');
+            console.assert(u.includes('view.officeapps.live.com'), 'officeViewer link');
+            console.assert(!u.includes(' '), 'officeViewer url must be encoded');
+            const cases = [
+                { i: 'bafy123', o: 'bafy123' },
+                { i: ' ipfs://bafy456 ', o: 'bafy456' },
+                { i: 'https://gateway.pinata.cloud/ipfs/bafy789', o: 'bafy789' },
+                { i: 'https://ipfs.io/ipfs/bafy999?filename=x.pptx', o: 'bafy999' },
+            ];
+            cases.forEach(({ i, o }) => { const got = extractCid(i); console.assert(got === o, 'extractCid fail', i, '=>', got, 'expect', o); });
+            console.assert(isOfficeExt('pptx') && isOfficeExt('docx') && isOfficeExt('xlsx'), 'office ext routing');
+            console.assert(isPdfExt('pdf') && !isPdfExt('docx'), 'pdf ext routing');
+        })();
 
         // Mount (use ReactDOM.render for UMD compatibility)
         (function mount() {
@@ -397,6 +708,5 @@
         })();
     </script>
 </body>
-
 
 </html>
